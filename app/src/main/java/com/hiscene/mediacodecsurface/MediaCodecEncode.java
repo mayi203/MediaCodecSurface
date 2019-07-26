@@ -4,9 +4,18 @@ import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
 import android.media.MediaCodecList;
 import android.media.MediaFormat;
+import android.opengl.GLES20;
+import android.opengl.Matrix;
 import android.util.Log;
 import android.view.Surface;
 
+import com.hiscene.mediacodecsurface.gles.EglBase;
+import com.hiscene.mediacodecsurface.gles.EglBase14;
+import com.hiscene.mediacodecsurface.gles.GlRectDrawer;
+
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 
@@ -16,12 +25,22 @@ public class MediaCodecEncode {
     private static final String MIME_TYPE = "video/avc";
     private int color_format_ = 0;
 
-    public Surface init(int width, int height) {
+    private EglBase captureEglBase = null;
+    private GlRectDrawer captureDrawer = null;
+    private float[] mCaptureMatrix = new float[16];
+    private int mCaptureWidth = 640;
+    private int mCaptureHeight = 480;
+    private Surface mInputSurface;
+
+    private FileOutputStream fileOutputStream;
+
+    public void init(int width, int height) {
+        mCaptureHeight = width;
+        mCaptureHeight = height;
         MediaCodecInfo codecInfo = selectCodec(MIME_TYPE);
         color_format_ = selectColorFormat(codecInfo, MIME_TYPE);
         if (color_format_ == 0) {
             Log.e(TAG, "supported color format is NOT found");
-            return null;
         } else {
             Log.i(TAG, "supported color format is found : " + color_format_);
         }
@@ -40,18 +59,32 @@ public class MediaCodecEncode {
             Log.e(TAG, e.toString());
         }
         mediaCodec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
-        return mediaCodec.createInputSurface();
+        mInputSurface = mediaCodec.createInputSurface();
     }
 
     public void start() {
         mediaCodec.start();
+        try {
+            fileOutputStream = new FileOutputStream(new File("/sdcard/h264_test.h264"));
+        } catch (FileNotFoundException e) {
+            e.printStackTrace();
+        }
     }
 
     public void stop() {
         mediaCodec.stop();
+        try {
+            fileOutputStream.flush();
+            fileOutputStream.close();
+            fileOutputStream = null;
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
     }
 
-    public void output() {
+    byte[] outData;
+
+    protected void output() {
         MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
         int encoderStatus = mediaCodec.dequeueOutputBuffer(info, 1000);
         while (encoderStatus >= 0) {
@@ -60,6 +93,17 @@ public class MediaCodecEncode {
                 Log.e(TAG, "encoderOutputBuffer " + encoderStatus + " was null");
             }
 
+            if (outData == null || outData.length < info.size) {
+                outData = new byte[info.size];
+            }
+            encodedData.position(info.offset);
+            encodedData.get(outData, 0, info.size);
+            try {
+                fileOutputStream.write(outData, 0, info.size);
+                fileOutputStream.flush();
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
             Log.d(TAG, "encoded output " + info.size);
 
             mediaCodec.releaseOutputBuffer(encoderStatus, false);
@@ -112,4 +156,51 @@ public class MediaCodecEncode {
                 return false;
         }
     }
+
+    public void drawToCapture(int textureId, int width, int height, float[] texMatrix, long timestamp_ns, EglBase mDummyContext) {
+        if (captureEglBase == null) {
+            captureEglBase = EglBase.create(mDummyContext.getEglBaseContext(), EglBase.CONFIG_RECORDABLE);
+        }
+        if (!captureEglBase.hasSurface()) {
+            try {
+                captureEglBase.createSurface(mInputSurface);
+                captureEglBase.makeCurrent();
+                captureDrawer = new GlRectDrawer();
+            } catch (RuntimeException e) {
+                e.printStackTrace();
+                captureEglBase.releaseSurface();
+                return;
+            }
+        }
+
+        try {
+            captureEglBase.makeCurrent();
+
+            // support crop only
+            int scaleWidth = mCaptureWidth;
+            int scaleHeight = mCaptureHeight;
+            System.arraycopy(texMatrix, 0, mCaptureMatrix, 0, 16);
+            if (mCaptureHeight * width <= mCaptureWidth * height) {
+                scaleHeight = mCaptureWidth * height / width;
+            } else {
+                scaleWidth = mCaptureHeight * width / height;
+            }
+            float fWidthScale = (float) mCaptureWidth / (float) scaleWidth;
+            float fHeightScale = (float) mCaptureHeight / (float) scaleHeight;
+            Matrix.scaleM(mCaptureMatrix, 0, fWidthScale, fHeightScale, 1.0f);
+            Matrix.translateM(mCaptureMatrix, 0, (1.0f - fWidthScale) / 2.0f, (1.0f - fHeightScale) / 2.0f, 1.0f);
+
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
+            captureDrawer.drawRgb(textureId, mCaptureMatrix, width, height,
+                    0, 0,
+                    mCaptureWidth, mCaptureHeight);
+            ((EglBase14) captureEglBase).swapBuffers(timestamp_ns);
+
+            output();
+            captureEglBase.detachCurrent();
+        } catch (RuntimeException e) {
+            e.printStackTrace();
+        }
+    }
+
 }
