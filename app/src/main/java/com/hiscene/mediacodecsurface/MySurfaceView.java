@@ -13,6 +13,8 @@ import com.hiscene.mediacodecsurface.gles.EglBase;
 import com.hiscene.mediacodecsurface.gles.GlRectDrawer;
 import com.hiscene.mediacodecsurface.gles.GlUtil;
 
+import java.util.concurrent.CountDownLatch;
+
 public class MySurfaceView extends SurfaceView implements SurfaceHolder.Callback, SurfaceTexture.OnFrameAvailableListener {
     private final String TAG = getClass().getSimpleName();
     CameraInstance cameraInstance;
@@ -54,24 +56,43 @@ public class MySurfaceView extends SurfaceView implements SurfaceHolder.Callback
         cameraInstance = new CameraInstance();
         mediaCodecEncode = new MediaCodecEncode();
         mediaCodecEncode.init(640, 480);
-
-        mDummyContext = EglBase.create(null, EglBase.CONFIG_PIXEL_BUFFER);
-        mDummyContext.createDummyPbufferSurface();
-        mDummyContext.makeCurrent();
-        mDummyDrawer = new GlRectDrawer();
-
-        mInputTextureId = GlUtil.generateTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES);
-        mInputSurfaceTexture = new SurfaceTexture(mInputTextureId);
-        mInputSurfaceTexture.setOnFrameAvailableListener(MySurfaceView.this);
+        final CountDownLatch latch = new CountDownLatch(1);
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                Log.i(TAG, Thread.currentThread().getName());
+                mDummyContext = EglBase.create(null, EglBase.CONFIG_PIXEL_BUFFER);
+                mDummyContext.createDummyPbufferSurface();
+                mDummyContext.makeCurrent();
+                mDummyDrawer = new GlRectDrawer();
+                mInputTextureId = GlUtil.generateTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES);
+                mInputSurfaceTexture = new SurfaceTexture(mInputTextureId);
+                mInputSurfaceTexture.setOnFrameAvailableListener(MySurfaceView.this);
+                latch.countDown();
+            }
+        }).start();
+        try {
+            latch.await();
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
 
         getHolder().addCallback(this);
     }
 
     @Override
     public void surfaceCreated(SurfaceHolder holder) {
-        cameraInstance.open();
-        cameraInstance.startPreview(mInputSurfaceTexture);
-        mediaCodecEncode.start();
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                Log.i(TAG, "open thread: " + Thread.currentThread().getName());
+
+                cameraInstance.open();
+                cameraInstance.startPreview(mInputSurfaceTexture);
+                mediaCodecEncode.start();
+            }
+        }).start();
+
     }
 
     @Override
@@ -88,7 +109,7 @@ public class MySurfaceView extends SurfaceView implements SurfaceHolder.Callback
 
     @Override
     public void onFrameAvailable(SurfaceTexture surfaceTexture) {
-        Log.i(TAG, "onFrameAvailable");
+        Log.i(TAG, "onFrameAvailable" + Thread.currentThread().getName());
         mDummyContext.makeCurrent();
         surfaceTexture.updateTexImage();
         long timestamp = surfaceTexture.getTimestamp();

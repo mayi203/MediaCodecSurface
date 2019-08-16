@@ -6,6 +6,8 @@ import android.media.MediaCodecList;
 import android.media.MediaFormat;
 import android.opengl.GLES20;
 import android.opengl.Matrix;
+import android.os.Handler;
+import android.os.HandlerThread;
 import android.util.Log;
 import android.view.Surface;
 
@@ -18,6 +20,7 @@ import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.concurrent.CountDownLatch;
 
 public class MediaCodecEncode {
     private final String TAG = getClass().getSimpleName();
@@ -33,6 +36,8 @@ public class MediaCodecEncode {
     private Surface mInputSurface;
 
     private FileOutputStream fileOutputStream;
+    HandlerThread mThread;
+    Handler mHandler;
 
     public void init(int width, int height) {
         mCaptureHeight = width;
@@ -63,6 +68,9 @@ public class MediaCodecEncode {
     }
 
     public void start() {
+        mThread = new HandlerThread("codec");
+        mThread.start();
+        mHandler = new Handler(mThread.getLooper());
         mediaCodec.start();
         try {
             fileOutputStream = new FileOutputStream(new File("/sdcard/h264_test.h264"));
@@ -72,6 +80,8 @@ public class MediaCodecEncode {
     }
 
     public void stop() {
+        mThread.quit();
+        mThread = null;
         mediaCodec.stop();
         try {
             fileOutputStream.flush();
@@ -157,48 +167,63 @@ public class MediaCodecEncode {
         }
     }
 
-    public void drawToCapture(int textureId, int width, int height, float[] texMatrix, long timestamp_ns, EglBase mDummyContext) {
-        if (captureEglBase == null) {
-            captureEglBase = EglBase.create(mDummyContext.getEglBaseContext(), EglBase.CONFIG_RECORDABLE);
-        }
-        if (!captureEglBase.hasSurface()) {
-            try {
-                captureEglBase.createSurface(mInputSurface);
-                captureEglBase.makeCurrent();
-                captureDrawer = new GlRectDrawer();
-            } catch (RuntimeException e) {
-                e.printStackTrace();
-                captureEglBase.releaseSurface();
-                return;
+    public void drawToCapture(final int textureId, final int width, final int height, final float[] texMatrix, final long timestamp_ns, final EglBase mDummyContext) {
+        final CountDownLatch latch = new CountDownLatch(1);
+        mHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                Log.i(TAG, "drawToCapture: " + Thread.currentThread().getName());
+                if (captureEglBase == null) {
+                    captureEglBase = EglBase.create(mDummyContext.getEglBaseContext(), EglBase.CONFIG_RECORDABLE);
+                }
+                if (!captureEglBase.hasSurface()) {
+                    try {
+                        captureEglBase.createSurface(mInputSurface);
+                        captureEglBase.makeCurrent();
+                        captureDrawer = new GlRectDrawer();
+                    } catch (RuntimeException e) {
+                        e.printStackTrace();
+                        captureEglBase.releaseSurface();
+                        return;
+                    }
+                }
+
+                try {
+                    captureEglBase.makeCurrent();
+
+                    // support crop only
+                    int scaleWidth = mCaptureWidth;
+                    int scaleHeight = mCaptureHeight;
+                    System.arraycopy(texMatrix, 0, mCaptureMatrix, 0, 16);
+                    if (mCaptureHeight * width <= mCaptureWidth * height) {
+                        scaleHeight = mCaptureWidth * height / width;
+                    } else {
+                        scaleWidth = mCaptureHeight * width / height;
+                    }
+                    float fWidthScale = (float) mCaptureWidth / (float) scaleWidth;
+                    float fHeightScale = (float) mCaptureHeight / (float) scaleHeight;
+                    Matrix.scaleM(mCaptureMatrix, 0, fWidthScale, fHeightScale, 1.0f);
+                    Matrix.translateM(mCaptureMatrix, 0, (1.0f - fWidthScale) / 2.0f, (1.0f - fHeightScale) / 2.0f, 1.0f);
+
+                    GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
+                    captureDrawer.drawRgb(textureId, mCaptureMatrix, width, height,
+                            0, 0,
+                            mCaptureWidth, mCaptureHeight);
+                    ((EglBase14) captureEglBase).swapBuffers(timestamp_ns);
+
+                    output();
+                    captureEglBase.detachCurrent();
+                } catch (RuntimeException e) {
+                    e.printStackTrace();
+                }
+
+                latch.countDown();
             }
-        }
+        });
 
         try {
-            captureEglBase.makeCurrent();
-
-            // support crop only
-            int scaleWidth = mCaptureWidth;
-            int scaleHeight = mCaptureHeight;
-            System.arraycopy(texMatrix, 0, mCaptureMatrix, 0, 16);
-            if (mCaptureHeight * width <= mCaptureWidth * height) {
-                scaleHeight = mCaptureWidth * height / width;
-            } else {
-                scaleWidth = mCaptureHeight * width / height;
-            }
-            float fWidthScale = (float) mCaptureWidth / (float) scaleWidth;
-            float fHeightScale = (float) mCaptureHeight / (float) scaleHeight;
-            Matrix.scaleM(mCaptureMatrix, 0, fWidthScale, fHeightScale, 1.0f);
-            Matrix.translateM(mCaptureMatrix, 0, (1.0f - fWidthScale) / 2.0f, (1.0f - fHeightScale) / 2.0f, 1.0f);
-
-            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
-            captureDrawer.drawRgb(textureId, mCaptureMatrix, width, height,
-                    0, 0,
-                    mCaptureWidth, mCaptureHeight);
-            ((EglBase14) captureEglBase).swapBuffers(timestamp_ns);
-
-            output();
-            captureEglBase.detachCurrent();
-        } catch (RuntimeException e) {
+            latch.await();
+        } catch (InterruptedException e) {
             e.printStackTrace();
         }
     }
